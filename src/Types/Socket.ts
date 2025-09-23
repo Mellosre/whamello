@@ -57,6 +57,8 @@ export type SocketConfig = {
   groupMetadataCache?: NodeCache;
   /** provide a cache to store recently sent messages, used to resend the message when someone fails to decrypt it (waiting for this message problem). Default cache store message per 20 seconds. Pass undefined to disable*/
   sentMessagesCache?: NodeCache;
+  /** whether to request a placeholder message when retrying a failed message */
+  requestPlaceholderOnRetry?: boolean;
   /** marks the client as online whenever the socket successfully connects */
   markOnlineOnConnect: boolean;
   /**
