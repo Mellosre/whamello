@@ -286,7 +286,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         receipt.attrs.participant = node.attrs.participant;
       }
 
-      if (retryCount > 1 || forceIncludeKeys) {
+      if (retryCount > 1 || forceIncludeKeys || shouldRecreateSession) {
         const { update, preKeys } = await getNextPreKeys(authState, 1);
 
         const [keyId] = Object.keys(preKeys);
@@ -309,8 +309,16 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
       }
 
       await sendNode(receipt);
-
-      logger.info({ msgAttrs: node.attrs, retryCount }, "sent retry receipt");
+      
+      logger.info(
+        {
+          msgAttrs: node.attrs,
+          retryCount,
+          shouldRecreateSession,
+          recreateReason
+        },
+        "sent retry receipt"
+      );
     });
   };
 
