@@ -1,6 +1,11 @@
 import { Boom } from "@hapi/boom";
 import { proto } from "../../WAProto";
-import { KEY_BUNDLE_TYPE, MIN_PREKEY_COUNT } from "../Defaults";
+import {
+  DEFAULT_CACHE_TTLS,
+  KEY_BUNDLE_TYPE,
+  MAX_MESSAGE_RETRY_COUNT,
+  MIN_PREKEY_COUNT
+} from "../Defaults";
 import {
   MessageReceiptType,
   MessageRelayOptions,
@@ -29,7 +34,9 @@ import {
   hkdf,
   unixTimestampSeconds,
   xmppPreKey,
-  xmppSignedPreKey
+  xmppSignedPreKey,
+  jidToSignalProtocolAddress,
+  validateSession
 } from "../Utils";
 import { makeMutex } from "../Utils/make-mutex";
 import { cleanMessage } from "../Utils/process-message";
@@ -57,8 +64,54 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     retryRequestDelayMs,
     getMessage,
     sentMessagesCache,
-    shouldIgnoreJid
+    shouldIgnoreJid,
+    sessionRecreateHistory
   } = config;
+
+  const enableAutoSessionRecreation = sessionRecreateHistory !== null;
+
+  const checkSessionCache = function (
+    jid: string,
+    retryCount: number,
+    hasSession: boolean
+  ): { reason: string; recreate: boolean } {
+    if (!sessionRecreateHistory) {
+      return { reason: "", recreate: false };
+    }
+
+    // If we don't have a session, always recreate
+    if (!hasSession) {
+      sessionRecreateHistory.set(jid, Date.now());
+
+      return {
+        reason: "we don't have a Signal session with them",
+        recreate: true
+      };
+    }
+
+    // Only consider recreation if retry count > 1
+    if (retryCount < 2) {
+      return { reason: "", recreate: false };
+    }
+
+    const now = Date.now();
+    const prevTime = sessionRecreateHistory.get<number>(jid);
+
+    // If no previous recreation or it's been more than an hour
+    if (
+      !prevTime ||
+      now - prevTime > DEFAULT_CACHE_TTLS.RECREATE_SESSION * 1000
+    ) {
+      sessionRecreateHistory.set(jid, now);
+      return {
+        reason: "retry count > 1 and over an hour since last recreation",
+        recreate: true
+      };
+    }
+
+    return { reason: "", recreate: false };
+  };
+
   const sock = makeMessagesSocket(config);
   const {
     ev,
@@ -149,9 +202,10 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     forceIncludeKeys = false
   ) => {
     const msgId = node.attrs.id;
+    const fromJid = node.attrs.from!;
 
     let retryCount = msgRetryMap[msgId] || 0;
-    if (retryCount >= 5) {
+    if (retryCount >= MAX_MESSAGE_RETRY_COUNT) {
       logger.error({ retryCount, msgId }, "reached retry limit, clearing");
       delete msgRetryMap[msgId];
       return;
@@ -165,6 +219,37 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
       signedPreKey,
       signedIdentityKey: identityKey
     } = authState.creds;
+
+    // Check if we should recreate the session
+    let shouldRecreateSession = false;
+    let recreateReason = "";
+
+    if (enableAutoSessionRecreation) {
+      try {
+        // Check if we have a session with this JID
+        const sessionId = jidToSignalProtocolAddress(fromJid);
+        const hasSession = await validateSession(fromJid, authState);
+        const result = checkSessionCache(
+          fromJid,
+          retryCount,
+          hasSession.exists
+        );
+        shouldRecreateSession = result.recreate;
+        recreateReason = result.reason;
+
+        if (shouldRecreateSession) {
+          logger.warn(
+            { fromJid, retryCount, reason: recreateReason },
+            "recreating session for retry"
+          );
+          // Delete existing session to force recreation
+          await authState.keys.set({ session: { [sessionId]: null } });
+          forceIncludeKeys = true;
+        }
+      } catch (error) {
+        logger.warn({ error, fromJid }, "failed to check session recreation");
+      }
+    }
 
     const deviceIdentity = encodeSignedDeviceIdentity(account!, true);
     await authState.keys.transaction(async () => {
@@ -201,7 +286,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         receipt.attrs.participant = node.attrs.participant;
       }
 
-      if (retryCount > 1 || forceIncludeKeys) {
+      if (retryCount > 1 || forceIncludeKeys || shouldRecreateSession) {
         const { update, preKeys } = await getNextPreKeys(authState, 1);
 
         const [keyId] = Object.keys(preKeys);
@@ -224,8 +309,16 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
       }
 
       await sendNode(receipt);
-
-      logger.info({ msgAttrs: node.attrs, retryCount }, "sent retry receipt");
+      
+      logger.info(
+        {
+          msgAttrs: node.attrs,
+          retryCount,
+          shouldRecreateSession,
+          recreateReason
+        },
+        "sent retry receipt"
+      );
     });
   };
 
@@ -555,11 +648,47 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     );
     const remoteJid = key.remoteJid!;
     const participant = key.participant || remoteJid;
+
+    const retryCount = +retryNode.attrs.count! || 1;
+
     // if it's the primary jid sending the request
     // just re-send the message to everyone
     // prevents the first message decryption failure
     const sendToAll = !jidDecode(participant)?.device;
-    await assertSessions([participant], true);
+
+    // Check if we should recreate session for this retry
+    let shouldRecreateSession = false;
+    let recreateReason = "";
+
+    if (enableAutoSessionRecreation) {
+      try {
+        const sessionId = jidToSignalProtocolAddress(participant);
+
+        const hasSession = await validateSession(participant, authState);
+        const result = checkSessionCache(
+          participant,
+          retryCount,
+          hasSession.exists
+        );
+        shouldRecreateSession = result.recreate;
+        recreateReason = result.reason;
+
+        if (shouldRecreateSession) {
+          logger.info(
+            { participant, retryCount, reason: recreateReason },
+            "recreating session for outgoing retry"
+          );
+          await authState.keys.set({ session: { [sessionId]: null } });
+        }
+      } catch (error) {
+        logger.warn(
+          { error, participant },
+          "failed to check session recreation for outgoing retry"
+        );
+      }
+    }
+
+    await assertSessions([participant], shouldRecreateSession);
 
     if (isJidGroup(remoteJid)) {
       await authState.keys.set({ "sender-key-memory": { [remoteJid]: null } });
@@ -581,7 +710,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
         } else {
           msgRelayOpts.participant = {
             jid: participant,
-            count: +retryNode.attrs.count
+            count: retryCount
           };
         }
 

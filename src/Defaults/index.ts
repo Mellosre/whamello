@@ -11,13 +11,15 @@ export const DEFAULT_ORIGIN = "https://web.whatsapp.com";
 export const DEF_CALLBACK_PREFIX = "CB:";
 export const DEF_TAG_PREFIX = "TAG:";
 export const PHONE_CONNECTION_CB = "CB:Pong";
+export const MAX_MESSAGE_RETRY_COUNT = 5;
 
 export const WA_DEFAULT_EPHEMERAL = 7 * 24 * 60 * 60;
 
 export const DEFAULT_CACHE_TTLS = {
   SIGNAL_STORE: 5 * 60, // 5 minutes
   GROUP_METADATA: 15 * 60, // 15 minutes
-  SENT_MESSAGES: 20 // 20 seconds
+  SENT_MESSAGES: 20, // 20 seconds
+  RECREATE_SESSION: 60 * 60 // 1 hour
 };
 
 export const NOISE_MODE = "Noise_XX_25519_AESGCM_SHA256\0\0\0\0";
@@ -70,6 +72,10 @@ export const DEFAULT_CONNECTION_CONFIG: SocketConfig = {
   }),
   sentMessagesCache: new NodeCache({
     stdTTL: DEFAULT_CACHE_TTLS.SENT_MESSAGES,
+    useClones: false
+  }),
+  sessionRecreateHistory: new NodeCache({
+    stdTTL: DEFAULT_CACHE_TTLS.RECREATE_SESSION,
     useClones: false
   })
 };
