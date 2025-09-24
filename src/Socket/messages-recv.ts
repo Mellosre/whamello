@@ -169,7 +169,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
       signedIdentityKey: identityKey
     } = authState.creds;
 
-    if (requestPlaceholderOnRetry && retryCount === 4) {
+    if (requestPlaceholderOnRetry && retryCount === 1) {
       setTimeout(async () => {
         const msgId = await requestPlaceholderResend(msgKey);
         logger.debug(
