@@ -56,6 +56,7 @@ export const DEFAULT_CONNECTION_CONFIG: SocketConfig = {
   fireInitQueries: true,
   auth: undefined as any,
   markOnlineOnConnect: true,
+  requestPlaceholderOnRetry: true,
   syncFullHistory: false,
   shouldSyncHistoryMessage: () => true,
   shouldIgnoreJid: () => false,

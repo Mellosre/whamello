@@ -57,7 +57,8 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
     retryRequestDelayMs,
     getMessage,
     sentMessagesCache,
-    shouldIgnoreJid
+    shouldIgnoreJid,
+    requestPlaceholderOnRetry
   } = config;
   const sock = makeMessagesSocket(config);
   const {
@@ -146,25 +147,36 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
 
   const sendRetryRequest = async (
     node: BinaryNode,
-    forceIncludeKeys = false
+    forceIncludeKeys = false,
+    msgKey: WAMessageKey
   ) => {
     const msgId = node.attrs.id;
+    const key = `${msgId}:${msgKey?.participant}`;
 
-    let retryCount = msgRetryMap[msgId] || 0;
+    let retryCount = msgRetryMap[key] || 0;
     if (retryCount >= 5) {
-      logger.error({ retryCount, msgId }, "reached retry limit, clearing");
-      delete msgRetryMap[msgId];
+      logger.error({ retryCount, key }, "reached retry limit, clearing");
+      delete msgRetryMap[key];
       return;
     }
 
     retryCount += 1;
-    msgRetryMap[msgId] = retryCount;
+    msgRetryMap[key] = retryCount;
 
     const {
       account,
       signedPreKey,
       signedIdentityKey: identityKey
     } = authState.creds;
+
+    if (requestPlaceholderOnRetry && retryCount === 1) {
+      setTimeout(async () => {
+        const msgId = await requestPlaceholderResend(msgKey);
+        logger.debug(
+          `sendRetryRequest: requested placeholder resend for message ${msgId} (scheduled)`
+        );
+      }, 3000);
+    }
 
     const deviceIdentity = encodeSignedDeviceIdentity(account!, true);
     await authState.keys.transaction(async () => {
@@ -768,7 +780,7 @@ export const makeMessagesRecvSocket = (config: SocketConfig) => {
             retryMutex.mutex(async () => {
               if (ws.readyState === ws.OPEN) {
                 const encNode = getBinaryNodeChild(node, "enc");
-                await sendRetryRequest(node, !encNode);
+                await sendRetryRequest(node, !encNode, msg.key);
                 if (retryRequestDelayMs) {
                   await delay(retryRequestDelayMs);
                 }
